@@ -344,6 +344,7 @@ void il2cpp_api_init(void *handle) {
 }
 
 void il2cpp_dump(const char *outDir) {
+    sleep(30);
     LOGI("dumping...");
     size_t size;
     auto domain = il2cpp_domain_get();
