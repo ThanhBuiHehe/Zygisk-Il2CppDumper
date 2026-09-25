@@ -194,7 +194,7 @@ std::string dump_property(Il2CppClass *klass) {
     return outPut.str();
 }
 // Hàm tạo signature cho method
-std::string get_method_signature(Il2CppMethod *method, Il2CppClass *klass) {
+std::string get_method_signature(MethodInfo *method, Il2CppClass *klass) {
     std::stringstream sig;
     
     // Kiểu trả về
