@@ -377,17 +377,18 @@ void dump_script_json(const char *outDir) {
     std::ofstream jsonStream(jsonPath);
     
     if (!jsonStream.is_open()) {
-        LOGE("Failed to open script.json");
+        LOGE("Failed to open script.json for writing");
         return;
     }
     
+    // ===== PHẦN 1: ScriptMethod =====
     jsonStream << "{\n  \"ScriptMethod\": [\n";
     
     size_t size = 0;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
     
-    bool first = true;
+    bool firstMethod = true;
     int methodCount = 0;
     
     for (int i = 0; i < size; ++i) {
@@ -412,31 +413,107 @@ void dump_script_json(const char *outDir) {
                 std::string namespaceName = il2cpp_class_get_namespace(const_cast<Il2CppClass*>(klass));
                 std::string methodName = il2cpp_method_get_name(method);
                 
-                std::string fullName = namespaceName.empty() ? 
-                    className + "$$" + methodName :
-                    namespaceName + "." + className + "$$" + methodName;
+                std::string fullName;
+                if (!namespaceName.empty() && namespaceName != "") {
+                    fullName = namespaceName + "." + className + "$$" + methodName;
+                } else {
+                    fullName = className + "$$" + methodName;
+                }
                 
-                std::string signature = get_method_signature(method, const_cast<Il2CppClass*>(klass));
+                // Tạo signature
+                std::string signature = "";
+                auto return_type = il2cpp_method_get_return_type(method);
+                if (return_type) {
+                    auto return_class = il2cpp_class_from_type(return_type);
+                    if (return_class) {
+                        std::string retNs = il2cpp_class_get_namespace(return_class);
+                        std::string retName = il2cpp_class_get_name(return_class);
+                        signature = retNs.empty() ? retName : retNs + "." + retName;
+                        signature += " " + fullName + "(";
+                        
+                        auto paramCount = il2cpp_method_get_param_count(method);
+                        for (int k = 0; k < paramCount; ++k) {
+                            auto param = il2cpp_method_get_param(method, k);
+                            if (param) {
+                                auto paramClass = il2cpp_class_from_type(param);
+                                if (paramClass) {
+                                    std::string pNs = il2cpp_class_get_namespace(paramClass);
+                                    std::string pName = il2cpp_class_get_name(paramClass);
+                                    signature += pNs.empty() ? pName : pNs + "." + pName;
+                                    if (k < paramCount - 1) signature += ", ";
+                                }
+                            }
+                        }
+                        signature += ")";
+                    }
+                }
                 
-                if (!first) jsonStream << ",\n";
+                if (!firstMethod) jsonStream << ",\n";
                 jsonStream << "    {\"Address\": " << rva 
                            << ", \"Name\": \"" << fullName 
                            << "\", \"Signature\": \"" << signature << "\"}";
-                first = false;
+                firstMethod = false;
                 methodCount++;
             }
         }
     }
     
     jsonStream << "\n  ],\n";
-    jsonStream << "  \"ScriptString\": [],\n";
-    jsonStream << "  \"ScriptMetadata\": {\"DumpVersion\": 6}\n";
+    LOGI("Dumped %d methods", methodCount);
+    
+    // ===== PHẦN 2: ScriptString =====
+    jsonStream << "  \"ScriptString\": [\n";
+    
+    bool firstString = true;
+    int stringCount = 0;
+    
+    // Thử truy cập metadata registration
+    auto metadata = domain->metadataRegistration;
+    
+    if (metadata && metadata->stringLiteralCount > 0) {
+        for (uint32_t i = 0; i < metadata->stringLiteralCount; ++i) {
+            auto literal = metadata->stringLiteralTable[i];
+            if (!literal.data || literal.length == 0) continue;
+            
+            uint64_t addr = (uint64_t)literal.data;
+            std::string value(literal.data, literal.length);
+            
+            // Escape JSON
+            std::string escaped;
+            for (char c : value) {
+                switch (c) {
+                    case '"': escaped += "\\\""; break;
+                    case '\\': escaped += "\\\\"; break;
+                    case '\n': escaped += "\\n"; break;
+                    case '\r': escaped += "\\r"; break;
+                    case '\t': escaped += "\\t"; break;
+                    default: escaped += c; break;
+                }
+            }
+            
+            if (!firstString) jsonStream << ",\n";
+            jsonStream << "    {\"Address\": " << addr 
+                       << ", \"Value\": \"" << escaped << "\"}";
+            firstString = false;
+            stringCount++;
+        }
+    }
+    
+    jsonStream << "\n  ],\n";
+    LOGI("Dumped %d strings", stringCount);
+    
+    // ===== PHẦN 3: ScriptMetadata =====
+    jsonStream << "  \"ScriptMetadata\": {\n";
+    jsonStream << "    \"DumpVersion\": 6\n";
+    jsonStream << "  }\n";
+    
+    // Đóng JSON
     jsonStream << "}\n";
     
     jsonStream.flush();
     jsonStream.close();
     
-    LOGI("script.json created with %d methods", methodCount);
+    LOGI("script.json created successfully at %s", jsonPath.c_str());
 }
 void il2cpp_dump(const char *outDir) {
     sleep(30);
