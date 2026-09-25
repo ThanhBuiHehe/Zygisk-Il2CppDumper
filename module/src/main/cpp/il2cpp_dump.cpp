@@ -370,20 +370,18 @@ void dump_script_json(const char *outDir) {
             auto klass = il2cpp_image_get_class(image, j);
             void *iter = nullptr;
             
-            while (auto method = il2cpp_class_get_methods(klass, &iter)) {
+            while (auto method = il2cpp_class_get_methods(const_cast<Il2CppClass*>(klass), &iter)) {
                 if (!method->methodPointer) continue;
                 
-                // Tính RVA
                 uint64_t rva = (uint64_t)method->methodPointer - il2cpp_base;
                 
-                // Lấy tên method đầy đủ: Namespace.Class$$Method
-                std::string className = il2cpp_class_get_name(klass);
-                std::string namespaceName = il2cpp_class_get_namespace(klass);
+                std::string className = il2cpp_class_get_name(const_cast<Il2CppClass*>(klass));
+                std::string namespaceName = il2cpp_class_get_namespace(const_cast<Il2CppClass*>(klass));
                 std::string methodName = il2cpp_method_get_name(method);
                 
                 std::string fullName;
-                if (!namespaceName.empty() && std::string(namespaceName) != "") {
-                    fullName = std::string(namespaceName) + "." + className + "$$" + methodName;
+                if (!namespaceName.empty()) {
+                    fullName = namespaceName + "." + className + "$$" + methodName;
                 } else {
                     fullName = className + "$$" + methodName;
                 }
