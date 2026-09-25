@@ -402,7 +402,7 @@ void dump_script_json(const char *outDir) {
         
         auto classCount = il2cpp_image_get_class_count(image);
         classCountTotal += classCount;
-        LOGI("  Class count: %d", classCount);
+        LOGI("  Class count: %zu", classCount);
         
         for (int j = 0; j < classCount; ++j) {
             auto klass = il2cpp_image_get_class(image, j);
