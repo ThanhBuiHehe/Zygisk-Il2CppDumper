@@ -66,13 +66,6 @@ typedef enum Il2CppStat {
     IL2CPP_STAT_INFLATED_METHOD_COUNT,
     IL2CPP_STAT_INFLATED_TYPE_COUNT,
 } Il2CppStat;
-typedef struct Il2CppDomain {
-    void* domain;
-    void* thread;
-    void* assembly;
-    void* method;
-    Il2CppMetadataRegistration* metadataRegistration;
-} Il2CppDomain;
 
 typedef enum Il2CppTypeEnum {
     IL2CPP_TYPE_END = 0x00,
