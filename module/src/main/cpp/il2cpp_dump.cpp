@@ -462,45 +462,8 @@ void dump_script_json(const char *outDir) {
     LOGI("Dumped %d methods", methodCount);
     
     // ===== PHẦN 2: ScriptString =====
-    jsonStream << "  \"ScriptString\": [\n";
-    
-    bool firstString = true;
-    int stringCount = 0;
-    
-    // Thử truy cập metadata registration
-    auto metadata = domain->metadataRegistration;
-    
-    if (metadata && metadata->stringLiteralCount > 0) {
-        for (uint32_t i = 0; i < metadata->stringLiteralCount; ++i) {
-            auto literal = metadata->stringLiteralTable[i];
-            if (!literal.data || literal.length == 0) continue;
-            
-            uint64_t addr = (uint64_t)literal.data;
-            std::string value(literal.data, literal.length);
-            
-            // Escape JSON
-            std::string escaped;
-            for (char c : value) {
-                switch (c) {
-                    case '"': escaped += "\\\""; break;
-                    case '\\': escaped += "\\\\"; break;
-                    case '\n': escaped += "\\n"; break;
-                    case '\r': escaped += "\\r"; break;
-                    case '\t': escaped += "\\t"; break;
-                    default: escaped += c; break;
-                }
-            }
-            
-            if (!firstString) jsonStream << ",\n";
-            jsonStream << "    {\"Address\": " << addr 
-                       << ", \"Value\": \"" << escaped << "\"}";
-            firstString = false;
-            stringCount++;
-        }
-    }
-    
-    jsonStream << "\n  ],\n";
-    LOGI("Dumped %d strings", stringCount);
+    jsonStream << "  \"ScriptString\": [],\n";
+    LOGI("ScriptString is empty (requires full Il2CppDomain definition)");
     
     // ===== PHẦN 3: ScriptMetadata =====
     jsonStream << "  \"ScriptMetadata\": {\n";
