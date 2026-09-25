@@ -193,7 +193,34 @@ std::string dump_property(Il2CppClass *klass) {
     }
     return outPut.str();
 }
-
+// Hàm tạo signature cho method
+std::string get_method_signature(Il2CppMethod *method, Il2CppClass *klass) {
+    std::stringstream sig;
+    
+    // Kiểu trả về
+    auto return_type = il2cpp_method_get_return_type(method);
+    auto return_class = il2cpp_class_from_type(return_type);
+    sig << il2cpp_class_get_namespace(return_class) << "." 
+        << il2cpp_class_get_name(return_class) << " ";
+    
+    // Tên class và method
+    sig << il2cpp_class_get_namespace(klass) << "." 
+        << il2cpp_class_get_name(klass) << "::"
+        << il2cpp_method_get_name(method) << "(";
+    
+    // Tham số
+    auto param_count = il2cpp_method_get_param_count(method);
+    for (int i = 0; i < param_count; ++i) {
+        auto param = il2cpp_method_get_param(method, i);
+        auto param_class = il2cpp_class_from_type(param);
+        sig << il2cpp_class_get_namespace(param_class) << "."
+            << il2cpp_class_get_name(param_class);
+        if (i < param_count - 1) sig << ", ";
+    }
+    sig << ")";
+    
+    return sig.str();
+}
 std::string dump_field(Il2CppClass *klass) {
     std::stringstream outPut;
     outPut << "\n\t// Fields\n";
@@ -379,22 +406,30 @@ void dump_script_json(const char *outDir) {
                 std::string namespaceName = il2cpp_class_get_namespace(const_cast<Il2CppClass*>(klass));
                 std::string methodName = il2cpp_method_get_name(method);
                 
-                std::string fullName;
-                if (!namespaceName.empty()) {
-                    fullName = namespaceName + "." + className + "$$" + methodName;
-                } else {
-                    fullName = className + "$$" + methodName;
-                }
+                std::string fullName = namespaceName.empty() ? 
+                    className + "$$" + methodName :
+                    namespaceName + "." + className + "$$" + methodName;
+                
+                std::string signature = get_method_signature(method, const_cast<Il2CppClass*>(klass));
                 
                 if (!first) jsonStream << ",\n";
-                jsonStream << "    {\"Address\": " << rva 
-                           << ", \"Name\": \"" << fullName << "\"}";
+                jsonStream << "    {\n";
+                jsonStream << "      \"Address\": " << rva << ",\n";
+                jsonStream << "      \"Name\": \"" << fullName << "\",\n";
+                jsonStream << "      \"Signature\": \"" << signature << "\"\n";
+                jsonStream << "    }";
                 first = false;
             }
         }
     }
     
-    jsonStream << "\n  ]\n}\n";
+    jsonStream << "\n  ],\n";
+    jsonStream << "  \"ScriptString\": [],\n";
+    jsonStream << "  \"ScriptMetadata\": {\n";
+    jsonStream << "    \"DumpVersion\": 6\n";
+    jsonStream << "  }\n";
+    jsonStream << "}\n";
+    
     jsonStream.close();
     
     LOGI("script.json created: %s", jsonPath.c_str());
