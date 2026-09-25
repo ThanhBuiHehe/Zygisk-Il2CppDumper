@@ -342,7 +342,65 @@ void il2cpp_api_init(void *handle) {
     auto domain = il2cpp_domain_get();
     il2cpp_thread_attach(domain);
 }
-
+// Hàm tạo script.json từ metadata
+void dump_script_json(const char *outDir) {
+    LOGI("Generating script.json...");
+    
+    std::string jsonPath = std::string(outDir).append("/files/script.json");
+    std::ofstream jsonStream(jsonPath);
+    
+    if (!jsonStream.is_open()) {
+        LOGE("Failed to open script.json for writing");
+        return;
+    }
+    
+    jsonStream << "{\n  \"ScriptMethod\": [\n";
+    
+    size_t size;
+    auto domain = il2cpp_domain_get();
+    auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
+    
+    bool first = true;
+    
+    for (int i = 0; i < size; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        auto classCount = il2cpp_image_get_class_count(image);
+        
+        for (int j = 0; j < classCount; ++j) {
+            auto klass = il2cpp_image_get_class(image, j);
+            void *iter = nullptr;
+            
+            while (auto method = il2cpp_class_get_methods(klass, &iter)) {
+                if (!method->methodPointer) continue;
+                
+                // Tính RVA
+                uint64_t rva = (uint64_t)method->methodPointer - il2cpp_base;
+                
+                // Lấy tên method đầy đủ: Namespace.Class$$Method
+                std::string className = il2cpp_class_get_name(klass);
+                std::string namespaceName = il2cpp_class_get_namespace(klass);
+                std::string methodName = il2cpp_method_get_name(method);
+                
+                std::string fullName;
+                if (!namespaceName.empty() && std::string(namespaceName) != "") {
+                    fullName = std::string(namespaceName) + "." + className + "$$" + methodName;
+                } else {
+                    fullName = className + "$$" + methodName;
+                }
+                
+                if (!first) jsonStream << ",\n";
+                jsonStream << "    {\"Address\": " << rva 
+                           << ", \"Name\": \"" << fullName << "\"}";
+                first = false;
+            }
+        }
+    }
+    
+    jsonStream << "\n  ]\n}\n";
+    jsonStream.close();
+    
+    LOGI("script.json created: %s", jsonPath.c_str());
+}
 void il2cpp_dump(const char *outDir) {
     sleep(30);
     LOGI("dumping...");
