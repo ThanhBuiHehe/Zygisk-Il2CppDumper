@@ -484,6 +484,6 @@ void il2cpp_dump(const char *outDir) {
         outStream << outPuts[i];
     }
     outStream.close();
-    dump_script_json(outDir)
+    dump_script_json(outDir);
     LOGI("dump done!");
 }
