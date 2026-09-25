@@ -454,7 +454,7 @@ void dump_script_json(const char *outDir) {
     LOGI("script.json created with %d methods from %d classes", methodCount, classCountTotal);
 }
 void il2cpp_dump(const char *outDir) {
-    sleep(30);
+    sleep(120);
     LOGI("dumping...");
     size_t size;
     auto domain = il2cpp_domain_get();
