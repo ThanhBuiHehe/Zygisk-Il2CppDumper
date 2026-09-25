@@ -377,30 +377,36 @@ void dump_script_json(const char *outDir) {
     std::ofstream jsonStream(jsonPath);
     
     if (!jsonStream.is_open()) {
-        LOGE("Failed to open script.json for writing");
+        LOGE("Failed to open script.json");
         return;
     }
     
     jsonStream << "{\n  \"ScriptMethod\": [\n";
     
-    size_t size;
+    size_t size = 0;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
     
     bool first = true;
+    int methodCount = 0;
     
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
-        auto classCount = il2cpp_image_get_class_count(image);
+        if (!image) continue;
         
+        auto classCount = il2cpp_image_get_class_count(image);
         for (int j = 0; j < classCount; ++j) {
             auto klass = il2cpp_image_get_class(image, j);
-            void *iter = nullptr;
+            if (!klass) continue;
             
-            while (auto method = il2cpp_class_get_methods(const_cast<Il2CppClass*>(klass), &iter)) {
+            void *iter = nullptr;
+            const MethodInfo *method = nullptr;
+            
+            while ((method = il2cpp_class_get_methods(const_cast<Il2CppClass*>(klass), &iter))) {
                 if (!method->methodPointer) continue;
                 
                 uint64_t rva = (uint64_t)method->methodPointer - il2cpp_base;
+                if (rva == 0) continue;
                 
                 std::string className = il2cpp_class_get_name(const_cast<Il2CppClass*>(klass));
                 std::string namespaceName = il2cpp_class_get_namespace(const_cast<Il2CppClass*>(klass));
@@ -413,26 +419,24 @@ void dump_script_json(const char *outDir) {
                 std::string signature = get_method_signature(method, const_cast<Il2CppClass*>(klass));
                 
                 if (!first) jsonStream << ",\n";
-                jsonStream << "    {\n";
-                jsonStream << "      \"Address\": " << rva << ",\n";
-                jsonStream << "      \"Name\": \"" << fullName << "\",\n";
-                jsonStream << "      \"Signature\": \"" << signature << "\"\n";
-                jsonStream << "    }";
+                jsonStream << "    {\"Address\": " << rva 
+                           << ", \"Name\": \"" << fullName 
+                           << "\", \"Signature\": \"" << signature << "\"}";
                 first = false;
+                methodCount++;
             }
         }
     }
     
     jsonStream << "\n  ],\n";
     jsonStream << "  \"ScriptString\": [],\n";
-    jsonStream << "  \"ScriptMetadata\": {\n";
-    jsonStream << "    \"DumpVersion\": 6\n";
-    jsonStream << "  }\n";
+    jsonStream << "  \"ScriptMetadata\": {\"DumpVersion\": 6}\n";
     jsonStream << "}\n";
     
+    jsonStream.flush();
     jsonStream.close();
     
-    LOGI("script.json created: %s", jsonPath.c_str());
+    LOGI("script.json created with %d methods", methodCount);
 }
 void il2cpp_dump(const char *outDir) {
     sleep(30);
