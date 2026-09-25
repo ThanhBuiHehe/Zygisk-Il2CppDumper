@@ -388,23 +388,17 @@ void dump_script_json(const char *outDir) {
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
     
-    LOGI("Total assemblies: %zu", size);
-    
     bool first = true;
     int methodCount = 0;
-    int classCountTotal = 0;
     
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
         if (!image) continue;
         
-        std::string imageName = il2cpp_image_get_name(image);
-        LOGI("Processing image %d: %s", i, imageName.c_str());
+        const char* imageName = il2cpp_image_get_name(image);
+        LOGI("Processing image %d: %s", i, imageName ? imageName : "NULL");
         
         auto classCount = il2cpp_image_get_class_count(image);
-        classCountTotal += classCount;
-        LOGI("  Class count: %zu", classCount);
-        
         for (int j = 0; j < classCount; ++j) {
             auto klass = il2cpp_image_get_class(image, j);
             if (!klass) continue;
@@ -413,11 +407,10 @@ void dump_script_json(const char *outDir) {
             const MethodInfo *method = nullptr;
             
             while ((method = il2cpp_class_get_methods(const_cast<Il2CppClass*>(klass), &iter))) {
-                // Không bỏ qua method không có pointer
-                uint64_t rva = 0;
-                if (method->methodPointer) {
-                    rva = (uint64_t)method->methodPointer - il2cpp_base;
-                }
+                if (!method->methodPointer) continue;
+                
+                uint64_t rva = (uint64_t)method->methodPointer - il2cpp_base;
+                if (rva == 0) continue;
                 
                 std::string className = il2cpp_class_get_name(const_cast<Il2CppClass*>(klass));
                 std::string namespaceName = il2cpp_class_get_namespace(const_cast<Il2CppClass*>(klass));
@@ -436,9 +429,10 @@ void dump_script_json(const char *outDir) {
                 first = false;
                 methodCount++;
                 
-                // Flush định kỳ để tránh mất dữ liệu
-                if (methodCount % 1000 == 0) {
+                // Flush định kỳ
+                if (methodCount % 5000 == 0) {
                     jsonStream.flush();
+                    LOGI("  Processed %d methods", methodCount);
                 }
             }
         }
@@ -452,91 +446,80 @@ void dump_script_json(const char *outDir) {
     jsonStream.flush();
     jsonStream.close();
     
-    LOGI("script.json created with %d methods from %d classes", methodCount, classCountTotal);
+    LOGI("script.json created with %d methods", methodCount);
 }
 void il2cpp_dump(const char *outDir) {
-    sleep(120);
     LOGI("dumping...");
-    size_t size;
+    
+    size_t size = 0;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
-    std::stringstream imageOutput;
-    for (int i = 0; i < size; ++i) {
-        auto image = il2cpp_assembly_get_image(assemblies[i]);
-        imageOutput << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
-    }
-    std::vector<std::string> outPuts;
-    if (il2cpp_image_get_class) {
-        LOGI("Version greater than 2018.3");
-        //使用il2cpp_image_get_class
-        for (int i = 0; i < size; ++i) {
-            auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::stringstream imageStr;
-            imageStr << "\n// Dll : " << il2cpp_image_get_name(image);
-            auto classCount = il2cpp_image_get_class_count(image);
-            for (int j = 0; j < classCount; ++j) {
-                auto klass = il2cpp_image_get_class(image, j);
-                auto type = il2cpp_class_get_type(const_cast<Il2CppClass *>(klass));
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                auto outPut = imageStr.str() + dump_type(type);
-                outPuts.push_back(outPut);
-            }
-        }
-    } else {
-        LOGI("Version less than 2018.3");
-        //使用反射
-        auto corlib = il2cpp_get_corlib();
-        auto assemblyClass = il2cpp_class_from_name(corlib, "System.Reflection", "Assembly");
-        auto assemblyLoad = il2cpp_class_get_method_from_name(assemblyClass, "Load", 1);
-        auto assemblyGetTypes = il2cpp_class_get_method_from_name(assemblyClass, "GetTypes", 0);
-        if (assemblyLoad && assemblyLoad->methodPointer) {
-            LOGI("Assembly::Load: %p", assemblyLoad->methodPointer);
-        } else {
-            LOGI("miss Assembly::Load");
-            return;
-        }
-        if (assemblyGetTypes && assemblyGetTypes->methodPointer) {
-            LOGI("Assembly::GetTypes: %p", assemblyGetTypes->methodPointer);
-        } else {
-            LOGI("miss Assembly::GetTypes");
-            return;
-        }
-        typedef void *(*Assembly_Load_ftn)(void *, Il2CppString *, void *);
-        typedef Il2CppArray *(*Assembly_GetTypes_ftn)(void *, void *);
-        for (int i = 0; i < size; ++i) {
-            auto image = il2cpp_assembly_get_image(assemblies[i]);
-            std::stringstream imageStr;
-            auto image_name = il2cpp_image_get_name(image);
-            imageStr << "\n// Dll : " << image_name;
-            //LOGD("image name : %s", image->name);
-            auto imageName = std::string(image_name);
-            auto pos = imageName.rfind('.');
-            auto imageNameNoExt = imageName.substr(0, pos);
-            auto assemblyFileName = il2cpp_string_new(imageNameNoExt.data());
-            auto reflectionAssembly = ((Assembly_Load_ftn) assemblyLoad->methodPointer)(nullptr,
-                                                                                        assemblyFileName,
-                                                                                        nullptr);
-            auto reflectionTypes = ((Assembly_GetTypes_ftn) assemblyGetTypes->methodPointer)(
-                    reflectionAssembly, nullptr);
-            auto items = reflectionTypes->vector;
-            for (int j = 0; j < reflectionTypes->max_length; ++j) {
-                auto klass = il2cpp_class_from_system_type((Il2CppReflectionType *) items[j]);
-                auto type = il2cpp_class_get_type(klass);
-                //LOGD("type name : %s", il2cpp_type_get_name(type));
-                auto outPut = imageStr.str() + dump_type(type);
-                outPuts.push_back(outPut);
-            }
-        }
-    }
-    LOGI("write dump file");
+    
+    LOGI("Total assemblies: %zu", size);
+    
+    // Mở file dump.cs để ghi trực tiếp
     auto outPath = std::string(outDir).append("/files/dump.cs");
     std::ofstream outStream(outPath);
-    outStream << imageOutput.str();
-    auto count = outPuts.size();
-    for (int i = 0; i < count; ++i) {
-        outStream << outPuts[i];
+    
+    if (!outStream.is_open()) {
+        LOGE("Failed to open dump.cs");
+        return;
     }
+    
+    // Ghi danh sách image
+    for (int i = 0; i < size; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        outStream << "// Image " << i << ": " << il2cpp_image_get_name(image) << "\n";
+    }
+    
+    int totalClasses = 0;
+    int totalMethods = 0;
+    
+    // Dump từng image, ghi trực tiếp xuống file
+    for (int i = 0; i < size; ++i) {
+        auto image = il2cpp_assembly_get_image(assemblies[i]);
+        if (!image) continue;
+        
+        const char* imageName = il2cpp_image_get_name(image);
+        LOGI("Processing image %d: %s", i, imageName ? imageName : "NULL");
+        
+        if (!il2cpp_image_get_class_count || !il2cpp_image_get_class) {
+            LOGW("il2cpp_image_get_class not available, skipping image %d", i);
+            continue;
+        }
+        
+        auto classCount = il2cpp_image_get_class_count(image);
+        LOGI("  Class count: %zu", classCount);
+        
+        for (int j = 0; j < classCount; ++j) {
+            auto klass = il2cpp_image_get_class(image, j);
+            if (!klass) continue;
+            
+            auto type = il2cpp_class_get_type(const_cast<Il2CppClass*>(klass));
+            if (!type) continue;
+            
+            // Ghi class trực tiếp xuống file
+            outStream << "\n// Dll : " << (imageName ? imageName : "NULL");
+            outStream << dump_type(type);
+            
+            totalClasses++;
+            
+            // Flush định kỳ để giải phóng buffer
+            if (totalClasses % 100 == 0) {
+                outStream.flush();
+                LOGI("  Processed %d classes", totalClasses);
+            }
+        }
+    }
+    
+    outStream.flush();
     outStream.close();
+    
+    LOGI("dump.cs done! Total %d classes", totalClasses);
+    
+    // Tạo script.json
     dump_script_json(outDir);
+    
     LOGI("dump done!");
 }
