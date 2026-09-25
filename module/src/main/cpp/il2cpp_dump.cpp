@@ -377,25 +377,33 @@ void dump_script_json(const char *outDir) {
     std::ofstream jsonStream(jsonPath);
     
     if (!jsonStream.is_open()) {
-        LOGE("Failed to open script.json for writing");
+        LOGE("Failed to open script.json");
         return;
     }
     
-    // ===== PHẦN 1: ScriptMethod =====
     jsonStream << "{\n  \"ScriptMethod\": [\n";
     
     size_t size = 0;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
     
-    bool firstMethod = true;
+    LOGI("Total assemblies: %zu", size);
+    
+    bool first = true;
     int methodCount = 0;
+    int classCountTotal = 0;
     
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
         if (!image) continue;
         
+        std::string imageName = il2cpp_image_get_name(image);
+        LOGI("Processing image %d: %s", i, imageName.c_str());
+        
         auto classCount = il2cpp_image_get_class_count(image);
+        classCountTotal += classCount;
+        LOGI("  Class count: %d", classCount);
+        
         for (int j = 0; j < classCount; ++j) {
             auto klass = il2cpp_image_get_class(image, j);
             if (!klass) continue;
@@ -404,79 +412,46 @@ void dump_script_json(const char *outDir) {
             const MethodInfo *method = nullptr;
             
             while ((method = il2cpp_class_get_methods(const_cast<Il2CppClass*>(klass), &iter))) {
-                if (!method->methodPointer) continue;
-                
-                uint64_t rva = (uint64_t)method->methodPointer - il2cpp_base;
-                if (rva == 0) continue;
+                // Không bỏ qua method không có pointer
+                uint64_t rva = 0;
+                if (method->methodPointer) {
+                    rva = (uint64_t)method->methodPointer - il2cpp_base;
+                }
                 
                 std::string className = il2cpp_class_get_name(const_cast<Il2CppClass*>(klass));
                 std::string namespaceName = il2cpp_class_get_namespace(const_cast<Il2CppClass*>(klass));
                 std::string methodName = il2cpp_method_get_name(method);
                 
-                std::string fullName;
-                if (!namespaceName.empty() && namespaceName != "") {
-                    fullName = namespaceName + "." + className + "$$" + methodName;
-                } else {
-                    fullName = className + "$$" + methodName;
-                }
+                std::string fullName = namespaceName.empty() ? 
+                    className + "$$" + methodName :
+                    namespaceName + "." + className + "$$" + methodName;
                 
-                // Tạo signature
-                std::string signature = "";
-                auto return_type = il2cpp_method_get_return_type(method);
-                if (return_type) {
-                    auto return_class = il2cpp_class_from_type(return_type);
-                    if (return_class) {
-                        std::string retNs = il2cpp_class_get_namespace(return_class);
-                        std::string retName = il2cpp_class_get_name(return_class);
-                        signature = retNs.empty() ? retName : retNs + "." + retName;
-                        signature += " " + fullName + "(";
-                        
-                        auto paramCount = il2cpp_method_get_param_count(method);
-                        for (int k = 0; k < paramCount; ++k) {
-                            auto param = il2cpp_method_get_param(method, k);
-                            if (param) {
-                                auto paramClass = il2cpp_class_from_type(param);
-                                if (paramClass) {
-                                    std::string pNs = il2cpp_class_get_namespace(paramClass);
-                                    std::string pName = il2cpp_class_get_name(paramClass);
-                                    signature += pNs.empty() ? pName : pNs + "." + pName;
-                                    if (k < paramCount - 1) signature += ", ";
-                                }
-                            }
-                        }
-                        signature += ")";
-                    }
-                }
+                std::string signature = get_method_signature(method, const_cast<Il2CppClass*>(klass));
                 
-                if (!firstMethod) jsonStream << ",\n";
+                if (!first) jsonStream << ",\n";
                 jsonStream << "    {\"Address\": " << rva 
                            << ", \"Name\": \"" << fullName 
                            << "\", \"Signature\": \"" << signature << "\"}";
-                firstMethod = false;
+                first = false;
                 methodCount++;
+                
+                // Flush định kỳ để tránh mất dữ liệu
+                if (methodCount % 1000 == 0) {
+                    jsonStream.flush();
+                }
             }
         }
     }
     
     jsonStream << "\n  ],\n";
-    LOGI("Dumped %d methods", methodCount);
-    
-    // ===== PHẦN 2: ScriptString =====
     jsonStream << "  \"ScriptString\": [],\n";
-    LOGI("ScriptString is empty (requires full Il2CppDomain definition)");
-    
-    // ===== PHẦN 3: ScriptMetadata =====
-    jsonStream << "  \"ScriptMetadata\": {\n";
-    jsonStream << "    \"DumpVersion\": 6\n";
-    jsonStream << "  }\n";
-    
-    // Đóng JSON
+    jsonStream << "  \"ScriptMetadata\": {\"DumpVersion\": 6}\n";
     jsonStream << "}\n";
     
     jsonStream.flush();
     jsonStream.close();
     
-    LOGI("script.json created successfully at %s", jsonPath.c_str());
+    LOGI("script.json created with %d methods from %d classes", methodCount, classCountTotal);
 }
 void il2cpp_dump(const char *outDir) {
     sleep(30);
