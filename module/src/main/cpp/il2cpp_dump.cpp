@@ -3,7 +3,7 @@
 //
 
 #include "il2cpp_dump.h"
-#include <cstdio.h>
+#include <cstdio>
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstring>
