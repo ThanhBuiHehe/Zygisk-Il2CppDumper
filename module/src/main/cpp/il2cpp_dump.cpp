@@ -3,6 +3,7 @@
 //
 
 #include "il2cpp_dump.h"
+#include <cstdio.h>
 #include <dlfcn.h>
 #include <cstdlib>
 #include <cstring>
@@ -466,6 +467,92 @@ void dump_script_json(const char *outDir) {
     
     LOGI("script.json created with %d methods", methodCount);
 }
+void dump_libil2cpp(const char *outDir) {
+    LOGI("Dumping libil2cpp.so from memory...");
+    
+    // Tìm base address của libil2cpp.so
+    Dl_info dlInfo;
+    if (!dladdr((void*)il2cpp_domain_get_assemblies, &dlInfo)) {
+        LOGE("Cannot find libil2cpp.so base address");
+        return;
+    }
+    
+    uintptr_t lib_base = (uintptr_t)dlInfo.dli_fbase;
+    LOGI("libil2cpp.so base: 0x%" PRIxPTR, lib_base);
+    
+    // Đọc file maps để tìm kích thước
+    FILE* maps = fopen("/proc/self/maps", "r");
+    if (!maps) {
+        LOGE("Cannot open /proc/self/maps");
+        return;
+    }
+    
+    char line[512];
+    uintptr_t lib_start = 0;
+    uintptr_t lib_end = 0;
+    
+    while (fgets(line, sizeof(line), maps)) {
+        uintptr_t start, end;
+        char perms[8];
+        char path[256] = {0};
+        
+        if (sscanf(line, "%" SCNxPTR "-%" SCNxPTR " %7s %*s %*s %*s %255s",
+                   &start, &end, perms, path) >= 4) {
+            if (strstr(path, "libil2cpp.so")) {
+                if (lib_start == 0 || start < lib_start) lib_start = start;
+                if (end > lib_end) lib_end = end;
+            }
+        }
+    }
+    fclose(maps);
+    
+    if (lib_start == 0 || lib_end == 0) {
+        LOGE("Cannot find libil2cpp.so in maps");
+        return;
+    }
+    
+    uintptr_t lib_size = lib_end - lib_start;
+    LOGI("libil2cpp.so: start=0x%" PRIxPTR ", end=0x%" PRIxPTR ", size=%zu bytes",
+         lib_start, lib_end, (size_t)lib_size);
+    
+    // Ghi lib ra file
+    std::string libPath = std::string(outDir).append("/files/libil2cpp.so");
+    std::ofstream libStream(libPath, std::ios::binary);
+    
+    if (!libStream.is_open()) {
+        LOGE("Cannot open libil2cpp.so for writing");
+        return;
+    }
+    
+    // Đọc từng block
+    const size_t BLOCK_SIZE = 0x10000;
+    uint8_t* buffer = new uint8_t[BLOCK_SIZE];
+    
+    for (uintptr_t addr = lib_start; addr < lib_end; addr += BLOCK_SIZE) {
+        size_t to_read = (addr + BLOCK_SIZE > lib_end) ? (lib_end - addr) : BLOCK_SIZE;
+        
+        // Đọc từ /proc/self/mem
+        FILE* mem = fopen("/proc/self/mem", "r");
+        if (!mem) {
+            LOGE("Cannot open /proc/self/mem");
+            delete[] buffer;
+            return;
+        }
+        
+        fseek(mem, addr, SEEK_SET);
+        size_t bytes_read = fread(buffer, 1, to_read, mem);
+        fclose(mem);
+        
+        if (bytes_read > 0) {
+            libStream.write(reinterpret_cast<char*>(buffer), bytes_read);
+        }
+    }
+    
+    libStream.close();
+    delete[] buffer;
+    
+    LOGI("libil2cpp.so dumped to %s (%zu bytes)", libPath.c_str(), (size_t)lib_size);
+}
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
     
@@ -535,6 +622,7 @@ void il2cpp_dump(const char *outDir) {
     outStream.close();
     
     LOGI("dump.cs done! Total %d classes", totalClasses);
+    dump_libil2cpp(outDir);
     
     // Tạo script.json
     dump_script_json(outDir);
