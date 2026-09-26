@@ -197,24 +197,42 @@ std::string dump_property(Il2CppClass *klass) {
 std::string get_method_signature(const MethodInfo *method, Il2CppClass *klass) {
     std::stringstream sig;
     
-    // Kiểu trả về
+    // Kiểu trả về (kiểm tra null)
     auto return_type = il2cpp_method_get_return_type(method);
-    auto return_class = il2cpp_class_from_type(return_type);
-    sig << il2cpp_class_get_namespace(return_class) << "." 
-        << il2cpp_class_get_name(return_class) << " ";
+    if (return_type) {
+        auto return_class = il2cpp_class_from_type(return_type);
+        if (return_class) {
+            const char* ns = il2cpp_class_get_namespace(return_class);
+            const char* name = il2cpp_class_get_name(return_class);
+            if (ns && name) sig << ns << "." << name << " ";
+            else if (name) sig << name << " ";
+        }
+    }
     
     // Tên class và method
-    sig << il2cpp_class_get_namespace(klass) << "." 
-        << il2cpp_class_get_name(klass) << "::"
-        << il2cpp_method_get_name(method) << "(";
+    const char* kNs = il2cpp_class_get_namespace(klass);
+    const char* kName = il2cpp_class_get_name(klass);
+    const char* mName = il2cpp_method_get_name(method);
+    
+    if (kNs && kName) sig << kNs << "." << kName << "::";
+    else if (kName) sig << kName << "::";
+    
+    if (mName) sig << mName << "(";
+    else sig << "unknown(";
     
     // Tham số
     auto param_count = il2cpp_method_get_param_count(method);
     for (int i = 0; i < param_count; ++i) {
         auto param = il2cpp_method_get_param(method, i);
-        auto param_class = il2cpp_class_from_type(param);
-        sig << il2cpp_class_get_namespace(param_class) << "."
-            << il2cpp_class_get_name(param_class);
+        if (param) {
+            auto param_class = il2cpp_class_from_type(param);
+            if (param_class) {
+                const char* pNs = il2cpp_class_get_namespace(param_class);
+                const char* pName = il2cpp_class_get_name(param_class);
+                if (pNs && pName) sig << pNs << "." << pName;
+                else if (pName) sig << pName;
+            }
+        }
         if (i < param_count - 1) sig << ", ";
     }
     sig << ")";
