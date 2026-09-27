@@ -13,10 +13,31 @@
 #include <sstream>
 #include <fstream>
 #include <unistd.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
+#include <fcntl.h>
+#include <link.h>
+#include <csignal>
+#include <csetjmp>
+#include <sys/stat.h>
+#include <elf.h>
+#include <algorithm>
 #include "xdl.h"
 #include "log.h"
 #include "il2cpp-tabledefs.h"
 #include "il2cpp-class.h"
+
+#ifndef SYS_process_vm_readv
+#if defined(__NR_process_vm_readv)
+#define SYS_process_vm_readv __NR_process_vm_readv
+#endif
+#endif
+
+#ifndef SYS_pread64
+#if defined(__NR_pread64)
+#define SYS_pread64 __NR_pread64
+#endif
+#endif
 
 #define DO_API(r, n, p) r (*n) p
 
@@ -25,6 +46,127 @@
 #undef DO_API
 
 static uint64_t il2cpp_base = 0;
+
+// Signal handling state for safe memory read
+static sigjmp_buf g_segv_jmp_buf;
+static volatile sig_atomic_t g_in_safe_read = 0;
+
+static void segv_signal_handler(int sig, siginfo_t *info, void *context) {
+    (void)info;
+    (void)context;
+    if (g_in_safe_read) {
+        siglongjmp(g_segv_jmp_buf, 1);
+    }
+    struct sigaction sa{};
+    sa.sa_handler = SIG_DFL;
+    sigemptyset(&sa.sa_mask);
+    sigaction(sig, &sa, nullptr);
+    raise(sig);
+}
+
+class ScopedSignalHandler {
+public:
+    ScopedSignalHandler() {
+        struct sigaction sa{};
+        sa.sa_flags = SA_SIGINFO;
+        sa.sa_sigaction = segv_signal_handler;
+        sigemptyset(&sa.sa_mask);
+        sigaction(SIGSEGV, &sa, &old_segv_);
+        sigaction(SIGBUS, &sa, &old_bus_);
+    }
+
+    ~ScopedSignalHandler() {
+        sigaction(SIGSEGV, &old_segv_, nullptr);
+        sigaction(SIGBUS, &old_bus_, nullptr);
+    }
+
+private:
+    struct sigaction old_segv_{};
+    struct sigaction old_bus_{};
+};
+
+static bool safe_mem_read(void *dst, const void *src, size_t len, int mem_fd) {
+    if (!dst || !src || len == 0) return false;
+
+    // 1. Try syscall SYS_process_vm_readv
+#if defined(SYS_process_vm_readv)
+    struct iovec local_iov = { dst, len };
+    struct iovec remote_iov = { const_cast<void*>(src), len };
+    ssize_t rc = syscall(SYS_process_vm_readv, getpid(), &local_iov, 1, &remote_iov, 1, 0);
+    if (rc == static_cast<ssize_t>(len)) {
+        return true;
+    }
+#endif
+
+    // 2. Try syscall SYS_pread64 on /proc/self/mem fd (opened with open(), NOT fopen)
+    if (mem_fd >= 0) {
+#if defined(SYS_pread64)
+        ssize_t prc = syscall(SYS_pread64, mem_fd, dst, len, static_cast<off64_t>(reinterpret_cast<uintptr_t>(src)));
+        if (prc == static_cast<ssize_t>(len)) {
+            return true;
+        }
+#endif
+    }
+
+    // 3. Fallback: guarded direct read with signal handler
+    g_in_safe_read = 1;
+    if (sigsetjmp(g_segv_jmp_buf, 1) == 0) {
+        memcpy(dst, src, len);
+        g_in_safe_read = 0;
+        return true;
+    } else {
+        g_in_safe_read = 0;
+        return false;
+    }
+}
+
+static bool ensure_directory(const std::string &path) {
+    struct stat st{};
+    if (stat(path.c_str(), &st) == 0) {
+        return S_ISDIR(st.st_mode);
+    }
+    if (mkdir(path.c_str(), 0755) == 0) {
+        return true;
+    }
+    return false;
+}
+
+static bool is_array_or_generic(const Il2CppType *type) {
+    if (!type) return true;
+    return (type->type == IL2CPP_TYPE_SZARRAY ||
+            type->type == IL2CPP_TYPE_ARRAY ||
+            type->type == IL2CPP_TYPE_GENERICINST ||
+            type->type == IL2CPP_TYPE_VAR ||
+            type->type == IL2CPP_TYPE_MVAR);
+}
+
+static Il2CppClass *safe_il2cpp_class_from_type(const Il2CppType *type) {
+    if (!type || !il2cpp_class_from_type) return nullptr;
+    if (is_array_or_generic(type)) return nullptr;
+    return il2cpp_class_from_type(type);
+}
+
+static std::string safe_get_type_name(const Il2CppType *type) {
+    if (!type) return "void";
+    if (type->type == IL2CPP_TYPE_SZARRAY) {
+        if (type->data.type) {
+            return safe_get_type_name(type->data.type) + "[]";
+        }
+        return "object[]";
+    }
+    if (type->type == IL2CPP_TYPE_ARRAY) {
+        return "System.Array";
+    }
+    if (type->type == IL2CPP_TYPE_GENERICINST || type->type == IL2CPP_TYPE_VAR || type->type == IL2CPP_TYPE_MVAR) {
+        return "T";
+    }
+    auto klass = safe_il2cpp_class_from_type(type);
+    if (klass && il2cpp_class_get_name) {
+        const char *name = il2cpp_class_get_name(klass);
+        if (name) return name;
+    }
+    return "object";
+}
 
 void init_il2cpp_api(void *handle) {
 #define DO_API(r, n, p) {                      \
@@ -119,8 +261,7 @@ std::string dump_method(Il2CppClass *klass) {
         if (_il2cpp_type_is_byref(return_type)) {
             outPut << "ref ";
         }
-        auto return_class = il2cpp_class_from_type(return_type);
-        outPut << il2cpp_class_get_name(return_class) << " " << il2cpp_method_get_name(method)
+        outPut << safe_get_type_name(return_type) << " " << il2cpp_method_get_name(method)
                << "(";
         auto param_count = il2cpp_method_get_param_count(method);
         for (int i = 0; i < param_count; ++i) {
@@ -142,8 +283,7 @@ std::string dump_method(Il2CppClass *klass) {
                     outPut << "[Out] ";
                 }
             }
-            auto parameter_class = il2cpp_class_from_type(param);
-            outPut << il2cpp_class_get_name(parameter_class) << " "
+            outPut << safe_get_type_name(param) << " "
                    << il2cpp_method_get_param_name(method, i);
             outPut << ", ";
         }
@@ -168,17 +308,28 @@ std::string dump_property(Il2CppClass *klass) {
         auto prop_name = il2cpp_property_get_name(prop);
         outPut << "\t";
         Il2CppClass *prop_class = nullptr;
+        const Il2CppType *prop_type = nullptr;
         uint32_t iflags = 0;
         if (get) {
             outPut << get_method_modifier(il2cpp_method_get_flags(get, &iflags));
-            prop_class = il2cpp_class_from_type(il2cpp_method_get_return_type(get));
+            prop_type = il2cpp_method_get_return_type(get);
+            prop_class = safe_il2cpp_class_from_type(prop_type);
         } else if (set) {
             outPut << get_method_modifier(il2cpp_method_get_flags(set, &iflags));
-            auto param = il2cpp_method_get_param(set, 0);
-            prop_class = il2cpp_class_from_type(param);
+            prop_type = il2cpp_method_get_param(set, 0);
+            prop_class = safe_il2cpp_class_from_type(prop_type);
         }
-        if (prop_class) {
+        if (prop_class && il2cpp_class_get_name) {
             outPut << il2cpp_class_get_name(prop_class) << " " << prop_name << " { ";
+            if (get) {
+                outPut << "get; ";
+            }
+            if (set) {
+                outPut << "set; ";
+            }
+            outPut << "}\n";
+        } else if (prop_type) {
+            outPut << safe_get_type_name(prop_type) << " " << prop_name << " { ";
             if (get) {
                 outPut << "get; ";
             }
@@ -188,7 +339,7 @@ std::string dump_property(Il2CppClass *klass) {
             outPut << "}\n";
         } else {
             if (prop_name) {
-                outPut << " // unknown property " << prop_name;
+                outPut << " // unknown property " << prop_name << "\n";
             }
         }
     }
@@ -199,39 +350,51 @@ std::string get_method_signature(const MethodInfo *method, Il2CppClass *klass) {
     std::stringstream sig;
     
     // Kiểu trả về (kiểm tra null)
-    auto return_type = il2cpp_method_get_return_type(method);
+    auto return_type = method ? il2cpp_method_get_return_type(method) : nullptr;
     if (return_type) {
-        auto return_class = il2cpp_class_from_type(return_type);
-        if (return_class) {
-            const char* ns = il2cpp_class_get_namespace(return_class);
-            const char* name = il2cpp_class_get_name(return_class);
-            if (ns && name) sig << ns << "." << name << " ";
-            else if (name) sig << name << " ";
+        if (!is_array_or_generic(return_type)) {
+            auto return_class = safe_il2cpp_class_from_type(return_type);
+            if (return_class) {
+                const char* ns = il2cpp_class_get_namespace ? il2cpp_class_get_namespace(return_class) : nullptr;
+                const char* name = il2cpp_class_get_name ? il2cpp_class_get_name(return_class) : nullptr;
+                if (ns && name && strlen(ns) > 0) sig << ns << "." << name << " ";
+                else if (name) sig << name << " ";
+            } else {
+                sig << safe_get_type_name(return_type) << " ";
+            }
+        } else {
+            sig << safe_get_type_name(return_type) << " ";
         }
     }
     
     // Tên class và method
-    const char* kNs = il2cpp_class_get_namespace(klass);
-    const char* kName = il2cpp_class_get_name(klass);
-    const char* mName = il2cpp_method_get_name(method);
+    const char* kNs = (klass && il2cpp_class_get_namespace) ? il2cpp_class_get_namespace(klass) : nullptr;
+    const char* kName = (klass && il2cpp_class_get_name) ? il2cpp_class_get_name(klass) : nullptr;
+    const char* mName = (method && il2cpp_method_get_name) ? il2cpp_method_get_name(method) : nullptr;
     
-    if (kNs && kName) sig << kNs << "." << kName << "::";
+    if (kNs && kName && strlen(kNs) > 0) sig << kNs << "." << kName << "::";
     else if (kName) sig << kName << "::";
     
     if (mName) sig << mName << "(";
     else sig << "unknown(";
     
     // Tham số
-    auto param_count = il2cpp_method_get_param_count(method);
+    auto param_count = method ? il2cpp_method_get_param_count(method) : 0;
     for (int i = 0; i < param_count; ++i) {
         auto param = il2cpp_method_get_param(method, i);
         if (param) {
-            auto param_class = il2cpp_class_from_type(param);
-            if (param_class) {
-                const char* pNs = il2cpp_class_get_namespace(param_class);
-                const char* pName = il2cpp_class_get_name(param_class);
-                if (pNs && pName) sig << pNs << "." << pName;
-                else if (pName) sig << pName;
+            if (!is_array_or_generic(param)) {
+                auto param_class = safe_il2cpp_class_from_type(param);
+                if (param_class) {
+                    const char* pNs = il2cpp_class_get_namespace ? il2cpp_class_get_namespace(param_class) : nullptr;
+                    const char* pName = il2cpp_class_get_name ? il2cpp_class_get_name(param_class) : nullptr;
+                    if (pNs && pName && strlen(pNs) > 0) sig << pNs << "." << pName;
+                    else if (pName) sig << pName;
+                } else {
+                    sig << safe_get_type_name(param);
+                }
+            } else {
+                sig << safe_get_type_name(param);
             }
         }
         if (i < param_count - 1) sig << ", ";
@@ -279,8 +442,7 @@ std::string dump_field(Il2CppClass *klass) {
             }
         }
         auto field_type = il2cpp_field_get_type(field);
-        auto field_class = il2cpp_class_from_type(field_type);
-        outPut << il2cpp_class_get_name(field_class) << " " << il2cpp_field_get_name(field);
+        outPut << safe_get_type_name(field_type) << " " << (il2cpp_field_get_name ? il2cpp_field_get_name(field) : "unknown");
         //TODO 获取构造函数初始化后的字段值
         if (attrs & FIELD_ATTRIBUTE_LITERAL && is_enum) {
             uint64_t val = 0;
@@ -294,8 +456,10 @@ std::string dump_field(Il2CppClass *klass) {
 
 std::string dump_type(const Il2CppType *type) {
     std::stringstream outPut;
-    auto *klass = il2cpp_class_from_type(type);
-    outPut << "\n// Namespace: " << il2cpp_class_get_namespace(klass) << "\n";
+    auto *klass = safe_il2cpp_class_from_type(type);
+    if (!klass) return "";
+    const char *kNs = il2cpp_class_get_namespace ? il2cpp_class_get_namespace(klass) : "";
+    outPut << "\n// Namespace: " << (kNs ? kNs : "") << "\n";
     auto flags = il2cpp_class_get_flags(klass);
     if (flags & TYPE_ATTRIBUTE_SERIALIZABLE) {
         outPut << "[Serializable]\n";
@@ -467,9 +631,463 @@ void dump_script_json(const char *outDir) {
     
     LOGI("script.json created with %d methods", methodCount);
 }
+struct MemoryMapRange {
+    uintptr_t start;
+    uintptr_t end;
+    char perms[5];
+    uint64_t offset;
+    std::string path;
+};
+
+static inline bool is_metadata_magic(const void *ptr) {
+    if (!ptr) return false;
+    const auto *bytes = reinterpret_cast<const uint8_t*>(ptr);
+    return bytes[0] == 0xAF && bytes[1] == 0x1B && bytes[2] == 0xB1 && bytes[3] == 0xFA;
+}
+
+void dump_metadata(const char *outDir) {
+    if (!outDir) {
+        LOGE("dump_metadata: outDir is null");
+        return;
+    }
+
+    LOGI("Starting dump_metadata...");
+    ScopedSignalHandler sig_guard;
+
+    std::string filesDir = std::string(outDir) + "/files";
+    if (!ensure_directory(filesDir)) {
+        LOGE("Failed to ensure directory: %s", filesDir.c_str());
+        return;
+    }
+
+    int mem_fd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+    if (mem_fd < 0) {
+        LOGW("Failed to open /proc/self/mem via syscall open, fallback to direct memory reads");
+    }
+
+    // Read /proc/self/maps using syscall open and read (avoid stdio fopen/fseek)
+    int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
+    if (maps_fd < 0) {
+        LOGE("Failed to open /proc/self/maps");
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    std::string maps_content;
+    char read_buf[8192];
+    ssize_t n;
+    while ((n = read(maps_fd, read_buf, sizeof(read_buf))) > 0) {
+        maps_content.append(read_buf, n);
+    }
+    close(maps_fd);
+
+    std::vector<MemoryMapRange> maps;
+    std::istringstream stream(maps_content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.empty()) continue;
+        MemoryMapRange range{};
+        char perms[5] = {0};
+        char path_buf[512] = {0};
+        uintptr_t start = 0, end = 0;
+        uint64_t offset = 0;
+
+        int fields = sscanf(line.c_str(), "%" PRIxPTR "-%" PRIxPTR " %4s %" PRIx64 " %*s %*s %511s",
+                            &start, &end, perms, &offset, path_buf);
+        if (fields >= 3) {
+            range.start = start;
+            range.end = end;
+            strncpy(range.perms, perms, sizeof(range.perms) - 1);
+            range.offset = offset;
+            if (fields >= 5) {
+                range.path = path_buf;
+            }
+            maps.push_back(range);
+        }
+    }
+
+    uintptr_t metadata_addr = 0;
+    uintptr_t metadata_map_end = 0;
+
+    // Search 1: Direct path match for global-metadata.dat
+    for (const auto &m : maps) {
+        if (m.perms[0] == 'r' && m.path.find("global-metadata.dat") != std::string::npos) {
+            uint8_t head[8] = {0};
+            if (safe_mem_read(head, reinterpret_cast<const void*>(m.start), sizeof(head), mem_fd)) {
+                if (is_metadata_magic(head)) {
+                    int32_t ver = *reinterpret_cast<const int32_t*>(head + 4);
+                    if (ver >= 20 && ver <= 40) {
+                        metadata_addr = m.start;
+                        metadata_map_end = m.end;
+                        LOGI("Found metadata by path match at %p (version: %d)", (void*)metadata_addr, ver);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Search 2: Scan memory ranges
+    if (metadata_addr == 0) {
+        constexpr size_t SCAN_CHUNK_SIZE = 1024 * 1024; // 1 MB
+        std::vector<uint8_t> scan_buf(SCAN_CHUNK_SIZE);
+
+        for (const auto &m : maps) {
+            // Must be readable, non-executable, not a library/system map
+            if (m.perms[0] != 'r' || m.perms[2] == 'x') continue;
+            if (m.end <= m.start || (m.end - m.start) < 256 * 1024) continue;
+            if (m.path.find(".so") != std::string::npos) continue;
+            if (m.path.find("/system/") != std::string::npos ||
+                m.path.find("/apex/") != std::string::npos ||
+                m.path.find("/vendor/") != std::string::npos ||
+                m.path.find("/dev/") != std::string::npos ||
+                m.path.find("[stack") != std::string::npos) {
+                continue;
+            }
+
+            // Quick check at range start
+            uint8_t head[8] = {0};
+            if (safe_mem_read(head, reinterpret_cast<const void*>(m.start), sizeof(head), mem_fd)) {
+                if (is_metadata_magic(head)) {
+                    int32_t ver = *reinterpret_cast<const int32_t*>(head + 4);
+                    if (ver >= 20 && ver <= 40) {
+                        metadata_addr = m.start;
+                        metadata_map_end = m.end;
+                        LOGI("Found metadata at range start %p (version: %d, path: %s)",
+                             (void*)metadata_addr, ver, m.path.c_str());
+                        break;
+                    }
+                }
+            }
+
+            // Scan inside range
+            for (uintptr_t cur = m.start; cur < m.end; cur += (SCAN_CHUNK_SIZE - 16)) {
+                size_t cur_len = std::min(SCAN_CHUNK_SIZE, m.end - cur);
+                if (!safe_mem_read(scan_buf.data(), reinterpret_cast<const void*>(cur), cur_len, mem_fd)) {
+                    continue;
+                }
+                for (size_t off = 0; off + 8 <= cur_len; off += 4) {
+                    if (is_metadata_magic(&scan_buf[off])) {
+                        int32_t ver = *reinterpret_cast<const int32_t*>(&scan_buf[off + 4]);
+                        if (ver >= 20 && ver <= 40) {
+                            metadata_addr = cur + off;
+                            metadata_map_end = m.end;
+                            LOGI("Found metadata in memory scan at %p (version: %d, map: %s)",
+                                 (void*)metadata_addr, ver, m.path.c_str());
+                            break;
+                        }
+                    }
+                }
+                if (metadata_addr != 0) break;
+            }
+            if (metadata_addr != 0) break;
+        }
+    }
+
+    if (metadata_addr == 0) {
+        LOGE("Failed to find global-metadata.dat in process memory!");
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    // Determine metadata size from header
+    size_t metadata_size = 0;
+    int32_t metadata_version = 0;
+    uint8_t header_buf[1024] = {0};
+    if (safe_mem_read(header_buf, reinterpret_cast<const void*>(metadata_addr), sizeof(header_buf), mem_fd)) {
+        metadata_version = *reinterpret_cast<const int32_t*>(header_buf + 4);
+        const uint32_t *pairs = reinterpret_cast<const uint32_t*>(header_buf + 8);
+        uint64_t max_end = 0;
+        for (int i = 0; i < 32; ++i) {
+            uint32_t sec_off = pairs[i * 2];
+            uint32_t sec_sz = pairs[i * 2 + 1];
+            if (sec_off > 0 && sec_sz > 0 && sec_off < 100 * 1024 * 1024 && sec_sz < 100 * 1024 * 1024) {
+                uint64_t end_pos = static_cast<uint64_t>(sec_off) + sec_sz;
+                if (end_pos > max_end && end_pos < 100 * 1024 * 1024) {
+                    max_end = end_pos;
+                }
+            }
+        }
+        if (max_end > 0) {
+            metadata_size = static_cast<size_t>(max_end);
+        }
+    }
+
+    if (metadata_size == 0) {
+        metadata_size = std::min<size_t>(metadata_map_end - metadata_addr, 60 * 1024 * 1024);
+        LOGW("Could not calculate exact size from header, falling back to: %zu bytes", metadata_size);
+    } else {
+        LOGI("Metadata header parsed: version %d, calculated size: %zu bytes (%.2f MB)",
+             metadata_version, metadata_size, metadata_size / (1024.0 * 1024.0));
+    }
+
+    // Dump to files/global-metadata.dat
+    std::string out_path = filesDir + "/global-metadata.dat";
+    int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (out_fd < 0) {
+        LOGE("Failed to open %s for writing", out_path.c_str());
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    constexpr size_t WRITE_CHUNK_SIZE = 1024 * 1024; // 1 MB
+    std::vector<uint8_t> write_buf(WRITE_CHUNK_SIZE);
+    size_t total_written = 0;
+
+    while (total_written < metadata_size) {
+        size_t cur_len = std::min(WRITE_CHUNK_SIZE, metadata_size - total_written);
+        uintptr_t cur_src = metadata_addr + total_written;
+
+        if (!safe_mem_read(write_buf.data(), reinterpret_cast<const void*>(cur_src), cur_len, mem_fd)) {
+            LOGE("Failed reading metadata memory at %p (offset %zu)", (void*)cur_src, total_written);
+            break;
+        }
+
+        ssize_t w = write(out_fd, write_buf.data(), cur_len);
+        if (w != static_cast<ssize_t>(cur_len)) {
+            LOGE("Failed writing metadata to file at offset %zu", total_written);
+            break;
+        }
+
+        total_written += cur_len;
+
+        // Periodic flush
+        if (total_written % (10 * 1024 * 1024) == 0 || total_written == metadata_size) {
+            fsync(out_fd);
+            LOGI("Metadata dump progress: %zu / %zu bytes (%.1f%%)",
+                 total_written, metadata_size, (total_written * 100.0) / metadata_size);
+        }
+    }
+
+    fsync(out_fd);
+    close(out_fd);
+    if (mem_fd >= 0) close(mem_fd);
+
+    LOGI("dump_metadata completed: %s (%zu bytes written)", out_path.c_str(), total_written);
+}
+
+struct DlIterateContext {
+    uintptr_t target_base = 0;
+    uintptr_t found_base = 0;
+    std::string lib_path;
+    std::vector<ElfW(Phdr)> phdrs;
+    bool found = false;
+};
+
+static int dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
+    (void)size;
+    auto *ctx = reinterpret_cast<DlIterateContext*>(data);
+    if (!info) return 0;
+
+    bool match = false;
+    if (info->dlpi_name && strstr(info->dlpi_name, "libil2cpp.so") != nullptr) {
+        match = true;
+    } else if (ctx->target_base != 0 && static_cast<uintptr_t>(info->dlpi_addr) == ctx->target_base) {
+        match = true;
+    }
+
+    if (match) {
+        ctx->found = true;
+        ctx->found_base = static_cast<uintptr_t>(info->dlpi_addr);
+        if (info->dlpi_name) {
+            ctx->lib_path = info->dlpi_name;
+        }
+        if (info->dlpi_phdr && info->dlpi_phnum > 0) {
+            ctx->phdrs.assign(info->dlpi_phdr, info->dlpi_phdr + info->dlpi_phnum);
+        }
+        return 1; // Found, stop iteration
+    }
+    return 0;
+}
+
+void dump_libil2cpp(const char *outDir) {
+    if (!outDir) {
+        LOGE("dump_libil2cpp: outDir is null");
+        return;
+    }
+
+    LOGI("Starting dump_libil2cpp...");
+    ScopedSignalHandler sig_guard;
+
+    std::string filesDir = std::string(outDir) + "/files";
+    if (!ensure_directory(filesDir)) {
+        LOGE("Failed to ensure directory: %s", filesDir.c_str());
+        return;
+    }
+
+    // 1. Find libil2cpp.so via dl_iterate_phdr
+    DlIterateContext dl_ctx;
+    dl_ctx.target_base = static_cast<uintptr_t>(il2cpp_base);
+    dl_iterate_phdr(dl_iterate_cb, &dl_ctx);
+
+    uintptr_t base = 0;
+    if (dl_ctx.found && dl_ctx.found_base != 0) {
+        base = dl_ctx.found_base;
+    } else if (il2cpp_base != 0) {
+        base = static_cast<uintptr_t>(il2cpp_base);
+    }
+
+    if (base == 0) {
+        LOGE("dump_libil2cpp: failed to determine libil2cpp base address!");
+        return;
+    }
+    LOGI("Target libil2cpp base: %" PRIxPTR " (path: %s)", base, dl_ctx.lib_path.c_str());
+
+    int mem_fd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
+    if (mem_fd < 0) {
+        LOGW("Failed to open /proc/self/mem via syscall open, fallback to direct memory reads");
+    }
+
+    // 2. Read and verify ELF Header
+    ElfW(Ehdr) ehdr{};
+    if (!safe_mem_read(&ehdr, reinterpret_cast<const void*>(base), sizeof(ehdr), mem_fd)) {
+        LOGE("Failed to read ELF header at %" PRIxPTR, base);
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    if (ehdr.e_ident[EI_MAG0] != ELFMAG0 || ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
+        ehdr.e_ident[EI_MAG2] != ELFMAG2 || ehdr.e_ident[EI_MAG3] != ELFMAG3) {
+        LOGE("Invalid ELF magic at %" PRIxPTR, base);
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    LOGI("ELF Header verified: class %d, machine 0x%x, phoff 0x%" PRIxPTR ", phnum %d",
+         ehdr.e_ident[EI_CLASS], ehdr.e_machine, static_cast<uintptr_t>(ehdr.e_phoff), ehdr.e_phnum);
+
+    // 3. Read program headers
+    std::vector<ElfW(Phdr)> phdrs;
+    if (!dl_ctx.phdrs.empty()) {
+        phdrs = dl_ctx.phdrs;
+    } else if (ehdr.e_phnum > 0 && ehdr.e_phoff > 0) {
+        phdrs.resize(ehdr.e_phnum);
+        if (!safe_mem_read(phdrs.data(), reinterpret_cast<const void*>(base + ehdr.e_phoff),
+                          ehdr.e_phnum * sizeof(ElfW(Phdr)), mem_fd)) {
+            LOGE("Failed to read ELF program headers from %" PRIxPTR, base + ehdr.e_phoff);
+            if (mem_fd >= 0) close(mem_fd);
+            return;
+        }
+    }
+
+    // 4. Calculate total size from PT_LOAD segments
+    uintptr_t max_vaddr = 0;
+    int pt_load_count = 0;
+    for (const auto &p : phdrs) {
+        if (p.p_type == PT_LOAD) {
+            pt_load_count++;
+            uintptr_t seg_end = p.p_vaddr + p.p_memsz;
+            if (seg_end > max_vaddr) {
+                max_vaddr = seg_end;
+            }
+        }
+    }
+
+    if (max_vaddr == 0 || pt_load_count == 0) {
+        LOGE("No valid PT_LOAD segments found in libil2cpp!");
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    size_t lib_total_size = static_cast<size_t>(max_vaddr);
+    LOGI("libil2cpp size from %d PT_LOAD segments: %zu bytes (%.2f MB)",
+         pt_load_count, lib_total_size, lib_total_size / (1024.0 * 1024.0));
+
+    // 5. Open output file files/libil2cpp.so
+    std::string out_path = filesDir + "/libil2cpp.so";
+    int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (out_fd < 0) {
+        LOGE("Failed to open %s for writing", out_path.c_str());
+        if (mem_fd >= 0) close(mem_fd);
+        return;
+    }
+
+    // 6. Fix ELF header and program headers for dumped binary
+    ElfW(Ehdr) patched_ehdr = ehdr;
+    if (patched_ehdr.e_shoff >= lib_total_size) {
+        patched_ehdr.e_shoff = 0;
+        patched_ehdr.e_shnum = 0;
+        patched_ehdr.e_shstrndx = 0;
+    }
+
+    std::vector<ElfW(Phdr)> patched_phdrs = phdrs;
+    for (auto &p : patched_phdrs) {
+        if (p.p_type == PT_LOAD) {
+            p.p_offset = p.p_vaddr;
+            p.p_filesz = p.p_memsz;
+        }
+    }
+
+    // 7. Dump PT_LOAD segments to file
+    constexpr size_t DUMP_CHUNK_SIZE = 1024 * 1024; // 1 MB
+    std::vector<uint8_t> chunk_buf(DUMP_CHUNK_SIZE);
+    size_t total_written = 0;
+
+    for (const auto &p : phdrs) {
+        if (p.p_type != PT_LOAD) continue;
+
+        uintptr_t seg_vaddr = p.p_vaddr;
+        size_t seg_memsz = p.p_memsz;
+        uintptr_t seg_src = base + seg_vaddr;
+
+        if (lseek64(out_fd, static_cast<off64_t>(seg_vaddr), SEEK_SET) == -1) {
+            LOGE("Failed to lseek to segment vaddr %" PRIxPTR, seg_vaddr);
+            continue;
+        }
+
+        size_t seg_written = 0;
+        while (seg_written < seg_memsz) {
+            size_t cur_len = std::min(DUMP_CHUNK_SIZE, seg_memsz - seg_written);
+            uintptr_t cur_src = seg_src + seg_written;
+
+            if (!safe_mem_read(chunk_buf.data(), reinterpret_cast<const void*>(cur_src), cur_len, mem_fd)) {
+                // If unreadable, fill with zeros
+                memset(chunk_buf.data(), 0, cur_len);
+            }
+
+            // Patch ELF header & phdrs at segment 0
+            if (seg_vaddr == 0 && seg_written == 0) {
+                if (sizeof(patched_ehdr) <= cur_len) {
+                    memcpy(chunk_buf.data(), &patched_ehdr, sizeof(patched_ehdr));
+                }
+                size_t phdrs_off = patched_ehdr.e_phoff;
+                size_t phdrs_bytes = patched_phdrs.size() * sizeof(ElfW(Phdr));
+                if (phdrs_off + phdrs_bytes <= cur_len) {
+                    memcpy(chunk_buf.data() + phdrs_off, patched_phdrs.data(), phdrs_bytes);
+                }
+            }
+
+            ssize_t w = write(out_fd, chunk_buf.data(), cur_len);
+            if (w != static_cast<ssize_t>(cur_len)) {
+                LOGE("Failed writing libil2cpp at vaddr %" PRIxPTR, seg_vaddr + seg_written);
+                break;
+            }
+
+            seg_written += cur_len;
+            total_written += cur_len;
+
+            // Periodic flush
+            if (total_written % (10 * 1024 * 1024) == 0) {
+                fsync(out_fd);
+                LOGI("libil2cpp dump progress: %zu bytes written", total_written);
+            }
+        }
+    }
+
+    fsync(out_fd);
+    close(out_fd);
+    if (mem_fd >= 0) close(mem_fd);
+
+    LOGI("dump_libil2cpp completed: %s (%zu bytes written)", out_path.c_str(), total_written);
+}
+
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
     
+    // Đảm bảo thư mục files/ tồn tại trước khi ghi
+    auto filesDir = std::string(outDir).append("/files");
+    ensure_directory(filesDir);
+
     size_t size = 0;
     auto domain = il2cpp_domain_get();
     auto assemblies = il2cpp_domain_get_assemblies(domain, &size);
@@ -539,6 +1157,13 @@ void il2cpp_dump(const char *outDir) {
     
     // Tạo script.json
     dump_script_json(outDir);
+
+    // Dump global-metadata.dat và libil2cpp.so
+    LOGI("Starting dump_metadata...");
+    dump_metadata(outDir);
+
+    LOGI("Starting dump_libil2cpp...");
+    dump_libil2cpp(outDir);
     
     LOGI("dump done!");
 }

@@ -1,10 +1,13 @@
 name: Build
 on:
+  push:
+    branches: [ "*" ]
   workflow_dispatch:
-      inputs:
-        package_name:
-          description: "Package name of the game:"
-          required: true
+    inputs:
+      package_name:
+        description: "Package name of the game:"
+        default: "com.dts.freefiremax"
+        required: false
 
 jobs:
   build:
@@ -18,8 +21,13 @@ jobs:
         cache: gradle
     - run: |
         chmod +x ./gradlew
-        sed -i 's/moduleDescription = "/moduleDescription = "(${{ github.event.inputs.package_name }}) /g' module.gradle
-        sed -i "s/com.game.packagename/${{ github.event.inputs.package_name }}/g" module/src/main/cpp/game.h
+        PKG_NAME="${{ github.event.inputs.package_name }}"
+        if [ -z "$PKG_NAME" ]; then
+          PKG_NAME="com.dts.freefiremax"
+        fi
+        echo "Building for package: $PKG_NAME"
+        sed -i "s/moduleDescription = \"/moduleDescription = \"($PKG_NAME) /g" module.gradle
+        sed -i "s/#define GamePackageName .*/#define GamePackageName \"$PKG_NAME\"/g" module/src/main/cpp/game.h
         ./gradlew :module:assembleRelease
     - uses: actions/upload-artifact@v4
       with:
