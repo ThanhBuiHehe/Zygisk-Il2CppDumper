@@ -931,7 +931,7 @@ void dump_libil2cpp(const char *outDir) {
         LOGE("dump_libil2cpp: failed to determine libil2cpp base address!");
         return;
     }
-    LOGI("Target libil2cpp base: %" PRIxPTR " (path: %s)", base, dl_ctx.lib_path.c_str());
+    LOGI("Target libil2cpp base: %p (path: %s)", reinterpret_cast<void*>(base), dl_ctx.lib_path.c_str());
 
     int mem_fd = open("/proc/self/mem", O_RDONLY | O_CLOEXEC);
     if (mem_fd < 0) {
@@ -941,20 +941,20 @@ void dump_libil2cpp(const char *outDir) {
     // 2. Read and verify ELF Header
     ElfW(Ehdr) ehdr{};
     if (!safe_mem_read(&ehdr, reinterpret_cast<const void*>(base), sizeof(ehdr), mem_fd)) {
-        LOGE("Failed to read ELF header at %" PRIxPTR, base);
+        LOGE("Failed to read ELF header at %p", reinterpret_cast<void*>(base));
         if (mem_fd >= 0) close(mem_fd);
         return;
     }
 
     if (ehdr.e_ident[EI_MAG0] != ELFMAG0 || ehdr.e_ident[EI_MAG1] != ELFMAG1 ||
         ehdr.e_ident[EI_MAG2] != ELFMAG2 || ehdr.e_ident[EI_MAG3] != ELFMAG3) {
-        LOGE("Invalid ELF magic at %" PRIxPTR, base);
+        LOGE("Invalid ELF magic at %p", reinterpret_cast<void*>(base));
         if (mem_fd >= 0) close(mem_fd);
         return;
     }
 
-    LOGI("ELF Header verified: class %d, machine 0x%x, phoff 0x%" PRIxPTR ", phnum %d",
-         ehdr.e_ident[EI_CLASS], ehdr.e_machine, static_cast<uintptr_t>(ehdr.e_phoff), ehdr.e_phnum);
+    LOGI("ELF Header verified: class %d, machine 0x%x, phoff 0x%llx, phnum %d",
+         ehdr.e_ident[EI_CLASS], ehdr.e_machine, static_cast<unsigned long long>(ehdr.e_phoff), ehdr.e_phnum);
 
     // 3. Read program headers
     std::vector<ElfW(Phdr)> phdrs;
@@ -964,7 +964,7 @@ void dump_libil2cpp(const char *outDir) {
         phdrs.resize(ehdr.e_phnum);
         if (!safe_mem_read(phdrs.data(), reinterpret_cast<const void*>(base + ehdr.e_phoff),
                           ehdr.e_phnum * sizeof(ElfW(Phdr)), mem_fd)) {
-            LOGE("Failed to read ELF program headers from %" PRIxPTR, base + ehdr.e_phoff);
+            LOGE("Failed to read ELF program headers from %p", reinterpret_cast<void*>(base + ehdr.e_phoff));
             if (mem_fd >= 0) close(mem_fd);
             return;
         }
@@ -1031,7 +1031,7 @@ void dump_libil2cpp(const char *outDir) {
         uintptr_t seg_src = base + seg_vaddr;
 
         if (lseek64(out_fd, static_cast<off64_t>(seg_vaddr), SEEK_SET) == -1) {
-            LOGE("Failed to lseek to segment vaddr %" PRIxPTR, seg_vaddr);
+            LOGE("Failed to lseek to segment vaddr 0x%llx", static_cast<unsigned long long>(seg_vaddr));
             continue;
         }
 
@@ -1059,7 +1059,7 @@ void dump_libil2cpp(const char *outDir) {
 
             ssize_t w = write(out_fd, chunk_buf.data(), cur_len);
             if (w != static_cast<ssize_t>(cur_len)) {
-                LOGE("Failed writing libil2cpp at vaddr %" PRIxPTR, seg_vaddr + seg_written);
+                LOGE("Failed writing libil2cpp at vaddr 0x%llx", static_cast<unsigned long long>(seg_vaddr + seg_written));
                 break;
             }
 
