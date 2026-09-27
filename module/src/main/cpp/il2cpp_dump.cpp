@@ -631,6 +631,10 @@ void dump_script_json(const char *outDir) {
     
     LOGI("script.json created with %d methods", methodCount);
 }
+static uintptr_t s_metadata_addr = 0;
+static size_t s_metadata_size = 0;
+static size_t s_lib_size = 0;
+
 struct MemoryMapRange {
     uintptr_t start;
     uintptr_t end;
@@ -821,6 +825,9 @@ void dump_metadata(const char *outDir) {
              metadata_version, metadata_size, metadata_size / (1024.0 * 1024.0));
     }
 
+    s_metadata_addr = metadata_addr;
+    s_metadata_size = metadata_size;
+
     // Dump to files/global-metadata.dat
     std::string out_path = filesDir + "/global-metadata.dat";
     int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
@@ -990,6 +997,7 @@ void dump_libil2cpp(const char *outDir) {
     }
 
     size_t lib_total_size = static_cast<size_t>(max_vaddr);
+    s_lib_size = lib_total_size;
     LOGI("libil2cpp size from %d PT_LOAD segments: %zu bytes (%.2f MB)",
          pt_load_count, lib_total_size, lib_total_size / (1024.0 * 1024.0));
 
@@ -1081,6 +1089,38 @@ void dump_libil2cpp(const char *outDir) {
     LOGI("dump_libil2cpp completed: %s (%zu bytes written)", out_path.c_str(), total_written);
 }
 
+void save_dump_info(const char *outDir) {
+    if (!outDir) return;
+    auto infoPath = std::string(outDir).append("/files/dump_info.txt");
+    std::ofstream out(infoPath);
+    if (out.is_open()) {
+        out << "====================================================\n";
+        out << "              ZYGISK-IL2CPPDUMPER INFO              \n";
+        out << "====================================================\n";
+        out << "Dump Address (il2cpp_base): 0x" << std::hex << il2cpp_base << "\n";
+        out << "Metadata Address:           0x" << std::hex << s_metadata_addr << "\n";
+        out << "Metadata Size:              0x" << std::hex << s_metadata_size << " (" << std::dec << s_metadata_size << " bytes)\n";
+        out << "libil2cpp Size:             0x" << std::hex << s_lib_size << " (" << std::dec << s_lib_size << " bytes)\n\n";
+        out << "----------------------------------------------------\n";
+        out << "HƯỚNG DẪN DÙNG CHO PC IL2CPPDUMPER:\n";
+        out << "1. Khi Il2CppDumper trên PC hỏi 'Input dump address':\n";
+        out << "   -> Hãy thử nhập: 0 (vì file libil2cpp.so đã được align từ offset 0)\n";
+        out << "   -> Nếu không được, nhập địa chỉ Base: 0x" << std::hex << il2cpp_base << "\n\n";
+        out << "2. Chú ý: Module Zygisk đã tự động xuất sẵn dump.cs\n";
+        out << "   và script.json tại cùng thư mục files/ này!\n";
+        out << "====================================================\n";
+        out.flush();
+        out.close();
+        LOGI("Dump info saved to %s", infoPath.c_str());
+    }
+
+    LOGI("====================================================");
+    LOGI("[Il2CppDumper] DUMP ADDRESS (il2cpp_base): 0x%llx", static_cast<unsigned long long>(il2cpp_base));
+    LOGI("[Il2CppDumper] METADATA ADDRESS: 0x%llx", static_cast<unsigned long long>(s_metadata_addr));
+    LOGI("[Il2CppDumper] For PC Il2CppDumper 'Input dump address': enter 0 or 0x%llx", static_cast<unsigned long long>(il2cpp_base));
+    LOGI("====================================================");
+}
+
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
     
@@ -1165,5 +1205,8 @@ void il2cpp_dump(const char *outDir) {
     LOGI("Starting dump_libil2cpp...");
     dump_libil2cpp(outDir);
     
+    // Lưu dump_info.txt (chứa il2cpp_base, metadata_addr)
+    save_dump_info(outDir);
+
     LOGI("dump done!");
 }
