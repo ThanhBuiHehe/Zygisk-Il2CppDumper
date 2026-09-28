@@ -88,7 +88,6 @@ private:
 static bool safe_mem_read(void *dst, const void *src, size_t len, int mem_fd) {
     if (!dst || !src || len == 0) return false;
 
-    // 1. Try syscall SYS_process_vm_readv
 #if defined(SYS_process_vm_readv)
     struct iovec local_iov = { dst, len };
     struct iovec remote_iov = { const_cast<void*>(src), len };
@@ -97,8 +96,6 @@ static bool safe_mem_read(void *dst, const void *src, size_t len, int mem_fd) {
         return true;
     }
 #endif
-
-    // 2. Try syscall SYS_pread64 on /proc/self/mem fd (opened with open(), NOT fopen)
     if (mem_fd >= 0) {
 #if defined(SYS_pread64)
         ssize_t prc = syscall(SYS_pread64, mem_fd, dst, len, static_cast<off64_t>(reinterpret_cast<uintptr_t>(src)));
@@ -108,7 +105,7 @@ static bool safe_mem_read(void *dst, const void *src, size_t len, int mem_fd) {
 #endif
     }
 
-    // 3. Fallback: guarded direct read with signal handler
+    
     g_in_safe_read = 1;
     if (sigsetjmp(g_segv_jmp_buf, 1) == 0) {
         memcpy(dst, src, len);
@@ -240,7 +237,7 @@ std::string dump_method(Il2CppClass *klass) {
     outPut << "\n\t// Methods\n";
     void *iter = nullptr;
     while (auto method = il2cpp_class_get_methods(klass, &iter)) {
-        //TODO attribute
+    
         if (method->methodPointer) {
             outPut << "\t// RVA: 0x";
             outPut << std::hex << (uint64_t) method->methodPointer - il2cpp_base;
@@ -345,11 +342,10 @@ std::string dump_property(Il2CppClass *klass) {
     }
     return outPut.str();
 }
-// Hàm tạo signature cho method
 std::string get_method_signature(const MethodInfo *method, Il2CppClass *klass) {
     std::stringstream sig;
     
-    // Kiểu trả về (kiểm tra null)
+    
     auto return_type = method ? il2cpp_method_get_return_type(method) : nullptr;
     if (return_type) {
         if (!is_array_or_generic(return_type)) {
@@ -367,7 +363,7 @@ std::string get_method_signature(const MethodInfo *method, Il2CppClass *klass) {
         }
     }
     
-    // Tên class và method
+    
     const char* kNs = (klass && il2cpp_class_get_namespace) ? il2cpp_class_get_namespace(klass) : nullptr;
     const char* kName = (klass && il2cpp_class_get_name) ? il2cpp_class_get_name(klass) : nullptr;
     const char* mName = (method && il2cpp_method_get_name) ? il2cpp_method_get_name(method) : nullptr;
@@ -378,7 +374,7 @@ std::string get_method_signature(const MethodInfo *method, Il2CppClass *klass) {
     if (mName) sig << mName << "(";
     else sig << "unknown(";
     
-    // Tham số
+    
     auto param_count = method ? il2cpp_method_get_param_count(method) : 0;
     for (int i = 0; i < param_count; ++i) {
         auto param = il2cpp_method_get_param(method, i);
@@ -553,15 +549,14 @@ void il2cpp_api_init(void *handle) {
     auto domain = il2cpp_domain_get();
     il2cpp_thread_attach(domain);
 }
-// Hàm tạo script.json từ metadata
 void dump_script_json(const char *outDir) {
-    LOGI("Generating script.json...");
+    LOGI("Generating script.json");
     
     std::string jsonPath = std::string(outDir).append("/files/script.json");
     std::ofstream jsonStream(jsonPath);
     
     if (!jsonStream.is_open()) {
-        LOGE("Failed to open script.json");
+        LOGE("Fail to open script.json");
         return;
     }
     
@@ -669,7 +664,7 @@ void dump_metadata(const char *outDir) {
         LOGW("Failed to open /proc/self/mem via syscall open, fallback to direct memory reads");
     }
 
-    // Read /proc/self/maps using syscall open and read (avoid stdio fopen/fseek)
+    
     int maps_fd = open("/proc/self/maps", O_RDONLY | O_CLOEXEC);
     if (maps_fd < 0) {
         LOGE("Failed to open /proc/self/maps");
@@ -713,7 +708,7 @@ void dump_metadata(const char *outDir) {
     uintptr_t metadata_addr = 0;
     uintptr_t metadata_map_end = 0;
 
-    // Search 1: Direct path match for global-metadata.dat
+    
     for (const auto &m : maps) {
         if (m.perms[0] == 'r' && m.path.find("global-metadata.dat") != std::string::npos) {
             uint8_t head[8] = {0};
@@ -731,13 +726,13 @@ void dump_metadata(const char *outDir) {
         }
     }
 
-    // Search 2: Scan memory ranges
+    
     if (metadata_addr == 0) {
         constexpr size_t SCAN_CHUNK_SIZE = 1024 * 1024; // 1 MB
         std::vector<uint8_t> scan_buf(SCAN_CHUNK_SIZE);
 
         for (const auto &m : maps) {
-            // Must be readable, non-executable, not a library/system map
+            
             if (m.perms[0] != 'r' || m.perms[2] == 'x') continue;
             if (m.end <= m.start || (m.end - m.start) < 256 * 1024) continue;
             if (m.path.find(".so") != std::string::npos) continue;
@@ -749,7 +744,7 @@ void dump_metadata(const char *outDir) {
                 continue;
             }
 
-            // Quick check at range start
+            
             uint8_t head[8] = {0};
             if (safe_mem_read(head, reinterpret_cast<const void*>(m.start), sizeof(head), mem_fd)) {
                 if (is_metadata_magic(head)) {
@@ -764,7 +759,7 @@ void dump_metadata(const char *outDir) {
                 }
             }
 
-            // Scan inside range
+            
             for (uintptr_t cur = m.start; cur < m.end; cur += (SCAN_CHUNK_SIZE - 16)) {
                 size_t cur_len = std::min(SCAN_CHUNK_SIZE, m.end - cur);
                 if (!safe_mem_read(scan_buf.data(), reinterpret_cast<const void*>(cur), cur_len, mem_fd)) {
@@ -794,7 +789,7 @@ void dump_metadata(const char *outDir) {
         return;
     }
 
-    // Determine metadata size from header
+    
     size_t metadata_size = 0;
     int32_t metadata_version = 0;
     uint8_t header_buf[1024] = {0};
@@ -828,7 +823,7 @@ void dump_metadata(const char *outDir) {
     s_metadata_addr = metadata_addr;
     s_metadata_size = metadata_size;
 
-    // Dump to files/global-metadata.dat
+    
     std::string out_path = filesDir + "/global-metadata.dat";
     int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (out_fd < 0) {
@@ -858,7 +853,7 @@ void dump_metadata(const char *outDir) {
 
         total_written += cur_len;
 
-        // Periodic flush
+        
         if (total_written % (10 * 1024 * 1024) == 0 || total_written == metadata_size) {
             fsync(out_fd);
             LOGI("Metadata dump progress: %zu / %zu bytes (%.1f%%)",
@@ -902,7 +897,7 @@ static int dl_iterate_cb(struct dl_phdr_info *info, size_t size, void *data) {
         if (info->dlpi_phdr && info->dlpi_phnum > 0) {
             ctx->phdrs.assign(info->dlpi_phdr, info->dlpi_phdr + info->dlpi_phnum);
         }
-        return 1; // Found, stop iteration
+        return 1;
     }
     return 0;
 }
@@ -913,7 +908,7 @@ void dump_libil2cpp(const char *outDir) {
         return;
     }
 
-    LOGI("Starting dump_libil2cpp...");
+    LOGI("Start dump_libil2cpp");
     ScopedSignalHandler sig_guard;
 
     std::string filesDir = std::string(outDir) + "/files";
@@ -921,8 +916,6 @@ void dump_libil2cpp(const char *outDir) {
         LOGE("Failed to ensure directory: %s", filesDir.c_str());
         return;
     }
-
-    // 1. Find libil2cpp.so via dl_iterate_phdr
     DlIterateContext dl_ctx;
     dl_ctx.target_base = static_cast<uintptr_t>(il2cpp_base);
     dl_iterate_phdr(dl_iterate_cb, &dl_ctx);
@@ -944,8 +937,6 @@ void dump_libil2cpp(const char *outDir) {
     if (mem_fd < 0) {
         LOGW("Failed to open /proc/self/mem via syscall open, fallback to direct memory reads");
     }
-
-    // 2. Read and verify ELF Header
     ElfW(Ehdr) ehdr{};
     if (!safe_mem_read(&ehdr, reinterpret_cast<const void*>(base), sizeof(ehdr), mem_fd)) {
         LOGE("Failed to read ELF header at %p", reinterpret_cast<void*>(base));
@@ -963,7 +954,7 @@ void dump_libil2cpp(const char *outDir) {
     LOGI("ELF Header verified: class %d, machine 0x%x, phoff 0x%llx, phnum %d",
          ehdr.e_ident[EI_CLASS], ehdr.e_machine, static_cast<unsigned long long>(ehdr.e_phoff), ehdr.e_phnum);
 
-    // 3. Read program headers
+    
     std::vector<ElfW(Phdr)> phdrs;
     if (!dl_ctx.phdrs.empty()) {
         phdrs = dl_ctx.phdrs;
@@ -977,7 +968,7 @@ void dump_libil2cpp(const char *outDir) {
         }
     }
 
-    // 4. Calculate total size from PT_LOAD segments
+    
     uintptr_t max_vaddr = 0;
     int pt_load_count = 0;
     for (const auto &p : phdrs) {
@@ -1001,7 +992,7 @@ void dump_libil2cpp(const char *outDir) {
     LOGI("libil2cpp size from %d PT_LOAD segments: %zu bytes (%.2f MB)",
          pt_load_count, lib_total_size, lib_total_size / (1024.0 * 1024.0));
 
-    // 5. Open output file files/libil2cpp.so
+    
     std::string out_path = filesDir + "/libil2cpp.so";
     int out_fd = open(out_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (out_fd < 0) {
@@ -1010,7 +1001,7 @@ void dump_libil2cpp(const char *outDir) {
         return;
     }
 
-    // 6. Fix ELF header and program headers for dumped binary
+    
     ElfW(Ehdr) patched_ehdr = ehdr;
     if (patched_ehdr.e_shoff >= lib_total_size) {
         patched_ehdr.e_shoff = 0;
@@ -1026,7 +1017,7 @@ void dump_libil2cpp(const char *outDir) {
         }
     }
 
-    // 7. Dump PT_LOAD segments to file
+    
     constexpr size_t DUMP_CHUNK_SIZE = 1024 * 1024; // 1 MB
     std::vector<uint8_t> chunk_buf(DUMP_CHUNK_SIZE);
     size_t total_written = 0;
@@ -1049,11 +1040,11 @@ void dump_libil2cpp(const char *outDir) {
             uintptr_t cur_src = seg_src + seg_written;
 
             if (!safe_mem_read(chunk_buf.data(), reinterpret_cast<const void*>(cur_src), cur_len, mem_fd)) {
-                // If unreadable, fill with zeros
+                
                 memset(chunk_buf.data(), 0, cur_len);
             }
 
-            // Patch ELF header & phdrs at segment 0
+            
             if (seg_vaddr == 0 && seg_written == 0) {
                 if (sizeof(patched_ehdr) <= cur_len) {
                     memcpy(chunk_buf.data(), &patched_ehdr, sizeof(patched_ehdr));
@@ -1074,7 +1065,7 @@ void dump_libil2cpp(const char *outDir) {
             seg_written += cur_len;
             total_written += cur_len;
 
-            // Periodic flush
+            
             if (total_written % (10 * 1024 * 1024) == 0) {
                 fsync(out_fd);
                 LOGI("libil2cpp dump progress: %zu bytes written", total_written);
@@ -1124,7 +1115,7 @@ void save_dump_info(const char *outDir) {
 void il2cpp_dump(const char *outDir) {
     LOGI("dumping...");
     
-    // Đảm bảo thư mục files/ tồn tại trước khi ghi
+    
     auto filesDir = std::string(outDir).append("/files");
     ensure_directory(filesDir);
 
@@ -1134,7 +1125,7 @@ void il2cpp_dump(const char *outDir) {
     
     LOGI("Total assemblies: %zu", size);
     
-    // Mở file dump.cs để ghi trực tiếp
+    
     auto outPath = std::string(outDir).append("/files/dump.cs");
     std::ofstream outStream(outPath);
     
@@ -1143,7 +1134,7 @@ void il2cpp_dump(const char *outDir) {
         return;
     }
     
-    // Ghi danh sách image
+    
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
         if (!image) continue;
@@ -1153,7 +1144,7 @@ void il2cpp_dump(const char *outDir) {
     int totalClasses = 0;
     int totalMethods = 0;
     
-    // Dump từng image, ghi trực tiếp xuống file
+    
     for (int i = 0; i < size; ++i) {
         auto image = il2cpp_assembly_get_image(assemblies[i]);
         if (!image) continue;
@@ -1176,13 +1167,13 @@ void il2cpp_dump(const char *outDir) {
             auto type = il2cpp_class_get_type(const_cast<Il2CppClass*>(klass));
             if (!type) continue;
             
-            // Ghi class trực tiếp xuống file
+            
             outStream << "\n// Dll : " << (imageName ? imageName : "NULL");
             outStream << dump_type(type);
             
             totalClasses++;
             
-            // Flush định kỳ để giải phóng buffer
+            
             if (totalClasses % 100 == 0) {
                 outStream.flush();
                 LOGI("  Processed %d classes", totalClasses);
@@ -1195,17 +1186,17 @@ void il2cpp_dump(const char *outDir) {
     
     LOGI("dump.cs done! Total %d classes", totalClasses);
     
-    // Tạo script.json
+    
     dump_script_json(outDir);
 
-    // Dump global-metadata.dat và libil2cpp.so
+    
     LOGI("Starting dump_metadata...");
     dump_metadata(outDir);
 
     LOGI("Starting dump_libil2cpp...");
     dump_libil2cpp(outDir);
     
-    // Lưu dump_info.txt (chứa il2cpp_base, metadata_addr)
+    
     save_dump_info(outDir);
 
     LOGI("dump done!");
